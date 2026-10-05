@@ -1,0 +1,119 @@
+name: Build APK Poket Harian
+
+on:
+  push:
+    paths-ignore:
+      - '**/keystore/**'
+      - '**.md'
+  workflow_dispatch:
+
+concurrency:
+  group: build-apk-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+env:
+  KS_ALIAS: poketharian
+  KS_PASS: ${{ secrets.KEYSTORE_PASSWORD || 'poketharian123' }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cari folder projek
+        run: |
+          if [ -f capacitor.config.json ]; then
+            PROJ="."
+          else
+            CFG=$(find . -maxdepth 3 -name capacitor.config.json -not -path "*/node_modules/*" | head -1)
+            if [ -z "$CFG" ]; then
+              echo "::error::capacitor.config.json tidak dijumpai."
+              exit 1
+            fi
+            PROJ=$(dirname "$CFG")
+          fi
+          echo "PROJ=$PROJ" >> "$GITHUB_ENV"
+          ls -la "$PROJ"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Pasang dependency
+        run: cd "$PROJ" && npm install
+
+      - name: Bina www/ (bundle library CDN untuk offline)
+        run: cd "$PROJ" && node scripts/build-www.mjs
+
+      - name: Jana projek Android
+        run: |
+          cd "$PROJ"
+          rm -rf android
+          npx cap add android
+          node scripts/patch-android.mjs
+          npx cap sync android
+
+      - name: Set nombor versi
+        run: |
+          cd "$PROJ"
+          sed -i -E "s/versionCode [0-9]+/versionCode ${{ github.run_number }}/" android[application]/build.gradle
+          sed -i -E "s/versionName \"[^\"]+\"/versionName \"1.0.${{ github.run_number }}\"/" android[application]/build.gradle
+          grep -E "versionCode|versionName" android[application]/build.gradle
+
+      - name: Keystore (jana sekali sahaja, kemudian commit)
+        run: |
+          cd "$PROJ"
+          KS_FILE=keystore/poket-harian.jks
+          if [ ! -f "$KS_FILE" ]; then
+            mkdir -p keystore
+            keytool -genkeypair -v -keystore "$KS_FILE" -alias "$KS_ALIAS" \
+              -keyalg RSA -keysize 2048 -validity 10000 \
+              -storepass "$KS_PASS" -keypass "$KS_PASS" \
+              -dname "CN=Poket Harian, O=Poket Harian, C=MY"
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git add "$KS_FILE"
+            git commit -m "Tambah keystore APK [skip ci]"
+            git push || echo "::warning::Gagal commit keystore. Semak Workflow permissions = Read and write."
+          fi
+
+      - name: Build APK release
+        run: |
+          cd "$PROJ/android"
+          chmod +x gradlew
+          ./gradlew assembleRelease --no-daemon
+
+      - name: Tandatangan APK
+        run: |
+          cd "$PROJ"
+          BT=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)
+          "$BT/zipalign" -p -f 4 android[application]/build/outputs/apk/release[application]-release-unsigned.apk aligned.apk
+          "$BT/apksigner" sign --ks keystore/poket-harian.jks --ks-key-alias "$KS_ALIAS" \
+            --ks-pass "pass:$KS_PASS" --key-pass "pass:$KS_PASS" \
+            --out "$GITHUB_WORKSPACE/PoketHarian.apk" aligned.apk
+          "$BT/apksigner" verify --verbose "$GITHUB_WORKSPACE/PoketHarian.apk"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PoketHarian-APK-${{ github.run_number }}
+          path: PoketHarian.apk
+
+      - name: Terbit Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v1.0.${{ github.run_number }}
+          name: Poket Harian v1.0.${{ github.run_number }}
+          body: |
+            Build automatik daripada commit ${{ github.sha }}.
+            Muat turun PoketHarian.apk dan install atas app sedia ada (data kekal).
+          files: PoketHarian.apk
+          make_latest: true
