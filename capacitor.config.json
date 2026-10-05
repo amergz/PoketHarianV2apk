@@ -1,0 +1,15 @@
+{
+  "appId": "com.poketharian.app",
+  "appName": "Poket Harian",
+  "webDir": "www",
+  "android": {
+    "allowMixedContent": false,
+    "backgroundColor": "#091E42"
+  },
+  "plugins": {
+    "SystemBars": {
+      "insetsHandling": "css",
+      "style": "DEFAULT"
+    }
+  }
+}
